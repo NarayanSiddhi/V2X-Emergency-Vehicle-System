@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Node.js
+node_modules/
+
+# SUMO
+*.log
+*.bak
+
+# System
+.DS_Store
