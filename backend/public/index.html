@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RSU Dashboard (Prototype)</title>
+    <title>RSU Dashboard</title>
+
     <style>
       body {
         font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
@@ -31,6 +32,14 @@
         border-radius: 10px;
         padding: 15px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      }
+
+      .event-item {
+        font-family: "Consolas", monospace;
+        background: #eef6ff;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        padding: 8px;
       }
 
       .ev {
@@ -93,7 +102,7 @@
     <h2>RSU Dashboard</h2>
     <p>Shows incoming EV priority requests and RSU decisions (real-time).</p>
 
-    <div id="events"></div>
+    <div id="events" style="margin-top: 10px"></div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="dashboard.js"></script>

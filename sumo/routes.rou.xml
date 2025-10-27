@@ -28,6 +28,13 @@
 -->
 
 <routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
+    <!-- Define Emergency Vehicle Type -->
+    <vType id="emergency" accel="2.0" decel="6.0" sigma="0.5"
+           length="5.0" minGap="2.5" maxSpeed="30.0"
+           guiShape="emergency" color="1,0,0"/>
+
+    <!-- Define EV Route -->
+    <route id="route0" edges="A0A1 A1A2 A2B2 B2B1"/>
     <vehicle id="0" depart="0.00" departLane="best" departPos="base" departSpeed="max">
         <route edges="A2B2 B2A2 A2A1"/>
     </vehicle>

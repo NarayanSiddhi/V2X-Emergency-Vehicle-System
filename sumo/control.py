@@ -1,8 +1,15 @@
-# control.py — robust baseline (no hard-coded 'passenger')
-import os, sys, random, csv
+import os
+import sys
+import time
+import csv
+import random
 from pathlib import Path
+import socketio
 
-# ---- SUMO / TraCI setup ----
+# =========================
+# --- SUMO Configuration ---
+# =========================
+
 SUMO_HOME = os.environ.get("SUMO_HOME")
 if not SUMO_HOME:
     raise EnvironmentError(
@@ -10,122 +17,182 @@ if not SUMO_HOME:
         '  setx SUMO_HOME "C:\\Program Files (x86)\\Eclipse\\Sumo"\n'
         'Then open a NEW terminal.'
     )
+
 TOOLS_DIR = os.path.join(SUMO_HOME, "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.append(TOOLS_DIR)
 
-import traci  # type: ignore
-import sumolib  # type: ignore
+import traci
+import sumolib
 
-SUMO_BINARY = os.environ.get("SUMO_BINARY", "sumo")   # set to sumo-gui to watch
+SUMO_BINARY = "sumo-gui"  # use GUI for visualization
 CFG = "config.sumocfg"
-
 NET_FILE = "network.net.xml"
-ROUTE_FILE = "routes.rou.xml"   # will be used via config unless you pass --route-files in sumo_cmd
+ROUTE_FILE = "routes.rou.xml"
 OUTPUT_CSV = "ev_baseline.csv"
 
-EV_ID = "ev0"
+EV_ID = "EV_1"
+EV_TYPE = "emergency"
+EV_ROUTE = "route0"
 EV_DEPART_TIME = 60.0
 KEEP_ALIVE_BUFFER = 3600.0
 MAX_SIM_TIME = 3 * 3600.0
 
+# ===============================
+# --- Helper Functions ---
+# ===============================
+
 def pick_far_edges(net):
-    edges = [e for e in net.getEdges() if e.getSpeed() > 0 and e.allows("passenger")]
+    """Pick two far apart edges for emergency route."""
+    edges = [e for e in net.getEdges() if e.getSpeed() > 0]
     if len(edges) < 2:
-        edges = [e for e in net.getEdges() if e.getSpeed() > 0]
-    if len(edges) < 2:
-        raise RuntimeError("Not enough usable edges in the network.")
-    best_pair, best_len = None, -1.0
-    for _ in range(300):
-        a, b = random.sample(edges, 2)
-        try:
-            route = sumolib.route.compute_shortest_path(a, b, "length")
-            if route and route.length > best_len:
-                best_pair, best_len = (a, b), route.length
-        except Exception:
-            continue
-    if not best_pair:
-        best_pair = random.sample(edges, 2)
-    return best_pair[0].getID(), best_pair[1].getID()
+        raise RuntimeError("Not enough usable edges in network.")
+    a, b = random.sample(edges, 2)
+    return a.getID(), b.getID()
 
 def choose_base_vtype():
+    """Pick an existing vehicle type from loaded simulation."""
     vtypes = traci.vehicletype.getIDList()
     if vtypes:
-        return vtypes[0]  # use whatever exists in routes (e.g., 'type0')
-    # last-resort fallback that SUMO always accepts
+        return vtypes[0]
     return "DEFAULT_VEHTYPE"
 
-def main():
-    # sanity: ensure route file exists so there are background cars
-    if not Path(ROUTE_FILE).exists():
-        print(f"WARNING: '{ROUTE_FILE}' not found. Make sure you generated routes with randomTrips.py.")
+# ==================================
+# --- Main SUMO + RSU Integration ---
+# ==================================
 
-    net = sumolib.net.readNet(NET_FILE)
-    src_edge_id, dst_edge_id = pick_far_edges(net)
+def main():
+    print("🚦 Starting SUMO simulation...")
+    if traci.isLoaded():
+        traci.close()
 
     sumo_cmd = [SUMO_BINARY, "-c", CFG, "--start"]
     traci.start(sumo_cmd)
+    print("✅ Connected to SUMO simulation")
 
+    # --- RSU (Node.js) SocketIO connection ---
+    sio = socketio.Client()
+
+    @sio.event
+    def connect():
+        print("✅ Connected to RSU server")
+
+    @sio.event
+    def disconnect():
+        print("❌ Disconnected from RSU server")
+
+    @sio.event
+    def rsu_decision(data):
+        print("📡 RSU Decision received:", data)
+        tls_id = data.get("tls_id", "A1")
+        action = data.get("action", "ack")
+
+        if action.startswith("extend_green"):
+            extra_time = 5 if "5s" in action else 10
+            try:
+                current_phase = traci.trafficlight.getPhase(tls_id)
+                remaining = traci.trafficlight.getNextSwitch(tls_id) - traci.simulation.getTime()
+                traci.trafficlight.setPhaseDuration(tls_id, remaining + extra_time)
+                print(f"Extended green at {tls_id} by {extra_time}s")
+            except Exception as e:
+                print("Error applying RSU decision:", e)
+
+    try:
+        sio.connect("http://localhost:3000")
+    except Exception as e:
+        print("⚠️ Could not connect to RSU server:", e)
+
+    # --- Main simulation loop ---
+    ev_added = False
     ev_departed = False
     ev_depart_time = None
     ev_arrival_time = None
+    net = sumolib.net.readNet(NET_FILE)
+    src_edge_id, dst_edge_id = pick_far_edges(net)
+
     must_run_until = EV_DEPART_TIME + KEEP_ALIVE_BUFFER
 
     try:
         while True:
             traci.simulationStep()
             sim_time = traci.simulation.getTime()
-
-            # spawn EV
-            if (not ev_departed) and sim_time >= EV_DEPART_TIME:
-                base_type = choose_base_vtype()
-
-                # compute a route using an existing type
+            time.sleep(0.15)
+            # Add EV only once
+            if sim_time >= EV_DEPART_TIME and not ev_added:
                 try:
-                    fr = traci.simulation.findRoute(src_edge_id, dst_edge_id, vType=base_type)
-                    route_edges = fr.edges if (fr and fr.edges) else [src_edge_id, dst_edge_id]
-                except Exception:
-                    route_edges = [src_edge_id, dst_edge_id]
+                    if EV_ID not in traci.vehicle.getIDList():
+                        traci.vehicle.add(EV_ID, EV_ROUTE, typeID=EV_TYPE)
+                        traci.vehicle.setColor(EV_ID, (255, 0, 0))
+                        traci.gui.trackVehicle("View #0", EV_ID)
+                        traci.gui.setZoom("View #0", 300)
+                        print(f"🚨 {EV_ID} added to SUMO simulation")
+                        ev_added = True
+                        ev_departed = True
+                        ev_depart_time = sim_time
+                        triggered_tls = set()
+                except Exception as e:
+                    print("Error adding EV:", e)
 
-                # create an EV type by copying whatever base type exists; if copy fails, just use base_type
-                ev_type = "evType"
-                if ev_type not in traci.vehicletype.getIDList():
-                    try:
-                        traci.vehicletype.copy(base_type, ev_type)
-                        traci.vehicletype.setColor(ev_type, (255, 0, 0, 255))  # red in GUI
-                    except Exception:
-                        ev_type = base_type  # safe fallback
+            # --- Emit RSU updates dynamically for multiple intersections ---
+            if ev_departed and EV_ID in traci.vehicle.getIDList():
+                try:
+                    ev_pos = traci.vehicle.getPosition(EV_ID)
+                    ev_edge = traci.vehicle.getRoadID(EV_ID)
+                    ev_speed = traci.vehicle.getSpeed(EV_ID)
 
-                # add EV
-                traci.vehicle.add(vehID=EV_ID, routeID="", typeID=ev_type, depart=str(sim_time))
-                traci.vehicle.setRoute(EV_ID, route_edges)
+                    # Check each intersection in network
+                    for tls_id in traci.trafficlight.getIDList():
+                        lanes = traci.trafficlight.getControlledLanes(tls_id)
+                        for lane in lanes:
+                            edge_id = lane.split("_")[0]
+                            if edge_id == ev_edge and tls_id not in triggered_tls:
+                                print(f"📡 EV approaching RSU {tls_id}")
 
-                ev_departed = True
-                ev_depart_time = sim_time
+                                # Send live EV update to RSU server
+                                sio.emit("ev_update", {
+                                    "ev_id": EV_ID,
+                                    "tls_id": tls_id,
+                                    "position": {"x": ev_pos[0], "y": ev_pos[1]},
+                                    "speed": ev_speed,
+                                    "distance": 50,
+                                    "eta_seconds": 10,
+                                    "timestamp": time.strftime("%I:%M:%S %p")
+                                })
+                                print(f"✅ Sent EV update to RSU server: {tls_id}")
 
-            # EV arrived?
-            if ev_departed and (EV_ID in traci.simulation.getArrivedIDList()):
+                                triggered_tls.add(tls_id)
+
+                                # Optional: extend green light locally too
+                                try:
+                                    traci.trafficlight.setPhaseDuration(tls_id, 10)
+                                    print(f"🟢 Extended green light for {tls_id}")
+                                except Exception as e:
+                                    print(f"⚠️ Failed to extend green for {tls_id}:", e)
+                except Exception as e:
+                    print("⚠️ Error while checking RSUs:", e)
+
+                    # --- Stop simulation when EV arrives ---
+            if ev_departed and EV_ID in traci.simulation.getArrivedIDList():
                 ev_arrival_time = sim_time
-                break
-
-            # No vehicles left but we haven't reached our keep-alive window yet? keep stepping.
-            if traci.simulation.getMinExpectedNumber() == 0 and sim_time >= must_run_until:
-                break
-
-            if sim_time >= MAX_SIM_TIME:
-                break
+                print(f"🏁 {EV_ID} arrived at destination in {sim_time:.2f}s")
 
     finally:
         traci.close(False)
+        sio.disconnect()
 
-    # write CSV
-    with open(OUTPUT_CSV, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["ev_id", "depart_time_s", "arrival_time_s", "travel_time_s", "src_edge", "dst_edge"])
-        tt = (ev_arrival_time - ev_depart_time) if (ev_depart_time is not None and ev_arrival_time is not None) else None
-        w.writerow([EV_ID, ev_depart_time, ev_arrival_time, tt, src_edge_id, dst_edge_id])
+        # --- Log EV travel data ---
+        if ev_depart_time and ev_arrival_time:
+            tt = ev_arrival_time - ev_depart_time
+        else:
+            tt = None
 
-    print(f"[Baseline] Wrote EV travel time to {OUTPUT_CSV}")
+        with open(OUTPUT_CSV, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ev_id", "depart_time_s", "arrival_time_s", "travel_time_s", "src_edge", "dst_edge"])
+            w.writerow([EV_ID, ev_depart_time, ev_arrival_time, tt, src_edge_id, dst_edge_id])
+
+        print(f"[Baseline] Wrote EV travel time to {OUTPUT_CSV}")
+
 
 if __name__ == "__main__":
     main()

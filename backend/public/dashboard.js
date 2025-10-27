@@ -1,27 +1,85 @@
-// connect to socket.io server
-const socket = io();
+// ===========================================
+// dashboard.js — fixed structured event logic
+// ===========================================
 
-// container
-const eventsDiv = document.getElementById('events');
+// Connect to socket.io server
+const socket = io("http://localhost:3000");
 
-function addEventHtml(html) {
-    const el = document.createElement('div');
-    el.className = 'ev';
-    el.innerHTML = html;
-    eventsDiv.prepend(el);
+// Helper: safely add formatted event HTML
+function addEventHtml(dec) {
+    const eventList = document.getElementById("events");
+    if (!eventList) return;
+
+    // Ensure it's an object, not a string
+    if (typeof dec !== "object") {
+        console.warn("⚠️ Invalid event payload:", dec);
+        return;
+    }
+
+    const tls = dec.tls_id || "Unknown RSU";
+    const action = dec.action || "No Action";
+    const reason = dec.reason || "No Reason Provided";
+    const time = dec.timestamp || new Date().toLocaleTimeString();
+
+    const item = document.createElement("div");
+    item.className = "event-item";
+    item.style.borderBottom = "1px solid #333";
+    item.style.padding = "6px";
+
+    item.innerHTML = `
+    <b>${time}</b> — 
+    <span><strong>${tls}</strong></span> | 
+    <span>${action}</span> | 
+    <span>${reason}</span>
+  `;
+
+    // Add color styling
+    if (action.toLowerCase().includes("connected")) {
+        item.style.color = "limegreen";
+    } else if (action.toLowerCase().includes("extend")) {
+        item.style.color = "dodgerblue";
+    } else if (action.toLowerCase().includes("stop")) {
+        item.style.color = "red";
+    } else {
+        item.style.color = "black";
+    }
+
+    eventList.prepend(item);
 }
 
-// on EV incoming
-socket.on('ev_event', (ev) => {
-    addEventHtml(`<div><strong>EV</strong> ${ev.ev_id} — ETA: ${ev.eta_seconds}s — pos: ${ev.position ? ev.position.lat + ',' + ev.position.lon : 'n/a'}</div>`);
+// ============================
+// Socket.IO Event Handlers
+// ============================
+
+// Connection acknowledgement
+socket.on("connect", () => {
+    console.log("✅ Connected to RSU server", socket.id);
 });
 
-// on RSU decision
-socket.on('rsu_decision', (dec) => {
-    addEventHtml(`<div class="decision">RSU Decision: ${dec.action} (duration: ${dec.duration}s) for TLS ${dec.tls_id} — ${dec.reason}</div>`);
+// Disconnection notice
+socket.on("disconnect", () => {
+    console.warn("❌ Disconnected from RSU server");
+    addEventHtml({
+        tls_id: "RSU_SERVER",
+        action: "disconnected",
+        reason: "Server unreachable",
+        timestamp: new Date().toLocaleTimeString()
+    });
 });
 
-// also show acknowledgement from server (optional)
-socket.on('connect', () => {
-    addEventHtml(`<div>Connected to RSU server (socket id ${socket.id})</div>`);
+// RSU decision events
+socket.on("rsu_decision", (dec) => {
+    console.log("🟢 RSU Decision received:", dec);
+    addEventHtml(dec);
+});
+
+// EV update events (optional)
+socket.on("ev_event", (ev) => {
+    console.log("🚗 EV event:", ev);
+    addEventHtml({
+        tls_id: ev.tls_id || "EV",
+        action: "update",
+        reason: `EV ETA: ${ev.eta_seconds}s | Speed: ${ev.speed.toFixed(1)} m/s`,
+        timestamp: new Date().toLocaleTimeString()
+    });
 });

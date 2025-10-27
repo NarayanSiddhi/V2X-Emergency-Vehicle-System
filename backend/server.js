@@ -1,67 +1,76 @@
-// server.js - RSU (Roadside Unit) server with HTTP + Socket.IO
-const express = require('express');
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
-const cors = require('cors');
-const { handleEvRequest } = require('./controllers/rsuController');
+// ============================
+// server.js (RSU + Dashboard)
+// ============================
+
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const path = require("path");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
-// serve dashboard static files
-app.use('/', express.static(path.join(__dirname, 'public')));
-
 const server = http.createServer(app);
-const io = require('socket.io')(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+const io = new Server(server, {
+    cors: { origin: "*" }
 });
 
-// ensure logs directory exists
-const LOG_DIR = path.join(__dirname, 'logs');
-if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
+// Serve dashboard frontend
+app.use(express.static(path.join(__dirname, "public")));
 
-// simple health endpoint
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Store RSU decisions for dashboard
+let rsuLog = [];
 
-// REST endpoint to accept EV priority request (optional)
-app.post('/api/ev_priority', async (req, res) => {
-    try {
-        const evMsg = req.body;
-        // handleEvRequest returns the RSU action (for now simulated)
-        const rsuAction = await handleEvRequest(evMsg, io);
-        return res.json({ status: 'accepted', action: rsuAction });
-    } catch (err) {
-        console.error('Error in /api/ev_priority', err);
-        res.status(500).json({ error: 'server error' });
-    }
-});
+// ============================
+//   RSU Logic
+// ============================
 
-// Socket.IO connection: dashboard or mock clients connect here
-io.on('connection', (socket) => {
-    console.log('Socket connected:', socket.id);
+// When a client connects (Python control.py)
+io.on("connection", (socket) => {
+    console.log("🚘 Connected to SUMO control.py");
 
-    // optionally accept EV broadcasts over socket too
-    socket.on('ev_priority', async (msg) => {
-        console.log('Received EV message via socket:', msg.ev_id || msg);
-        try {
-            const action = await handleEvRequest(msg, io);
-            // optionally send RSU response back to EV client (if EV is connected)
-            socket.emit('rsu_response', action);
-        } catch (err) {
-            console.error('handleEvRequest error', err);
+    // Initial event to confirm connection on dashboard
+    io.emit("rsu_decision", {
+        tls_id: "RSU_SERVER",
+        action: "connected",
+        duration: 0,
+        reason: "Server is live and ready",
+        timestamp: new Date().toLocaleTimeString()
+    });
+
+    socket.on("ev_update", (data) => {
+        console.log("📍 EV update received:", data);
+
+        if (data.tls_id && data.distance < 100) {
+            const decision = {
+                tls_id: data.tls_id || "Unknown RSU",
+                action: "extend_green_5s",
+                duration: 5,
+                reason: "EV approaching intersection",
+                timestamp: new Date().toLocaleTimeString()
+            };
+            io.emit("rsu_decision", decision);
+            rsuLog.push(decision);
+            console.log("✅ Sent RSU decision:", decision);
         }
     });
 
-    socket.on('disconnect', () => {
-        console.log('Socket disconnected:', socket.id);
+    socket.on("disconnect", () => {
+        console.log("❌ Disconnected from SUMO control.py");
     });
 });
 
-// start server
-const PORT = process.env.PORT || 3000;
+
+// ============================
+//   Dashboard API
+// ============================
+app.get("/api/logs", (req, res) => {
+    res.json(rsuLog);
+});
+
+// ============================
+//   Start Server
+// ============================
+const PORT = 3000;
 server.listen(PORT, () => {
-    console.log(`RSU server listening on http://localhost:${PORT}`);
-    console.log(`Open dashboard at http://localhost:${PORT}/index.html`);
+    console.log(`🚦 RSU server running on port ${PORT}`);
+    console.log(`🌐 Dashboard: http://localhost:${PORT}`);
 });
