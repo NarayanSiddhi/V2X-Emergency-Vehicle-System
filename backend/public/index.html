@@ -87,24 +87,47 @@
     </style>
   </head>
   <body>
-    <header
-      style="
-        background: #0077b6;
-        color: white;
-        padding: 10px;
-        border-radius: 8px;
-        text-align: center;
-      "
-    >
-      <strong>🚨 V2X RSU Dashboard</strong>
-    </header>
+    <h1 style="font-family: Arial; color: #333">
+      🚑 V2X Emergency Vehicle Dashboard
+    </h1>
 
-    <h2>RSU Dashboard</h2>
-    <p>Shows incoming EV priority requests and RSU decisions (real-time).</p>
+    <section>
+      <h3>EV Live Status</h3>
+      <p><b>ID:</b> <span id="ev-id">-</span></p>
+      <p><b>Position:</b> <span id="ev-pos">-</span></p>
+      <p><b>Simulation Time:</b> <span id="ev-time">-</span></p>
+      <p><b>Lane:</b> <span id="ev-lane">-</span></p>
+      <p><b>Edge:</b> <span id="ev-edge">-</span></p>
+      <p><b>Active RSU:</b> <span id="ev-rsu">-</span></p>
+    </section>
 
-    <div id="events" style="margin-top: 10px"></div>
+    <hr />
 
-    <script src="/socket.io/socket.io.js"></script>
+    <section>
+      <h3>Event Log</h3>
+      <div
+        id="status-log"
+        style="
+          height: 150px;
+          overflow-y: scroll;
+          border: 1px solid #aaa;
+          padding: 5px;
+        "
+      ></div>
+    </section>
+
+    <hr />
+
+    <section>
+      <h3>Network Map</h3>
+      <canvas
+        id="network-map"
+        width="900"
+        height="600"
+        style="border: 1px solid #aaa"
+      ></canvas>
+    </section>
+
     <script src="dashboard.js"></script>
   </body>
 </html>

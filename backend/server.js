@@ -1,76 +1,136 @@
-// ============================
-// server.js (RSU + Dashboard)
-// ============================
-
 const express = require("express");
 const http = require("http");
-const { Server } = require("socket.io");
+const WebSocket = require("ws");
 const path = require("path");
+const fs = require("fs");
+const xml2js = require("xml2js");
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
-});
+app.use(express.json());
 
-// Serve dashboard frontend
+// serve static dashboard
 app.use(express.static(path.join(__dirname, "public")));
 
-// Store RSU decisions for dashboard
-let rsuLog = [];
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// ============================
-//   RSU Logic
-// ============================
+let lastEVStatus = null;
+let cachedNetwork = null;
 
-// When a client connects (Python control.py)
-io.on("connection", (socket) => {
-    console.log("🚘 Connected to SUMO control.py");
+// ---------- EV UPDATE FROM TRACI ----------
+app.post("/update", (req, res) => {
+    lastEVStatus = req.body;
 
-    // Initial event to confirm connection on dashboard
-    io.emit("rsu_decision", {
-        tls_id: "RSU_SERVER",
-        action: "connected",
-        duration: 0,
-        reason: "Server is live and ready",
-        timestamp: new Date().toLocaleTimeString()
-    });
-
-    socket.on("ev_update", (data) => {
-        console.log("📍 EV update received:", data);
-
-        if (data.tls_id && data.distance < 100) {
-            const decision = {
-                tls_id: data.tls_id || "Unknown RSU",
-                action: "extend_green_5s",
-                duration: 5,
-                reason: "EV approaching intersection",
-                timestamp: new Date().toLocaleTimeString()
-            };
-            io.emit("rsu_decision", decision);
-            rsuLog.push(decision);
-            console.log("✅ Sent RSU decision:", decision);
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+                type: "ev_update",
+                data: lastEVStatus
+            }));
         }
     });
 
-    socket.on("disconnect", () => {
-        console.log("❌ Disconnected from SUMO control.py");
+    res.status(200).json({ message: "OK" });
+});
+
+// ---------- NETWORK GEOMETRY FROM route.net.xml ----------
+app.get("/network", (req, res) => {
+    if (cachedNetwork) {
+        return res.json(cachedNetwork);
+    }
+
+    const netPath = path.join(__dirname, "..", "sumo_new", "route.net.xml");
+
+    fs.readFile(netPath, "utf8", (err, xmlData) => {
+        if (err) {
+            console.error("Error reading net file:", err);
+            return res.status(500).json({ error: "Could not read net file" });
+        }
+
+        xml2js.parseString(xmlData, (err, json) => {
+            if (err) {
+                console.error("Error parsing net file:", err);
+                return res.status(500).json({ error: "Could not parse net file" });
+            }
+
+            try {
+                const net = json.net;
+                const lanes = [];
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+
+                // 1) Lanes (polylines)
+                const edges = net.edge || [];
+                edges.forEach(edge => {
+                    const attrs = edge.$ || {};
+                    if (attrs.function === "internal") return; // skip internal edges
+
+                    (edge.lane || []).forEach(lane => {
+                        const lAttrs = lane.$ || {};
+                        if (!lAttrs.shape) return;
+
+                        const points = lAttrs.shape.split(" ").map(p => {
+                            const [xs, ys] = p.split(",");
+                            const x = parseFloat(xs);
+                            const y = parseFloat(ys);
+
+                            if (!Number.isNaN(x) && !Number.isNaN(y)) {
+                                minX = Math.min(minX, x);
+                                maxX = Math.max(maxX, x);
+                                minY = Math.min(minY, y);
+                                maxY = Math.max(maxY, y);
+                            }
+
+                            return [x, y];
+                        });
+
+                        lanes.push({
+                            id: lAttrs.id,
+                            points
+                        });
+                    });
+                });
+
+                // 2) Traffic light junctions (J1..J7)
+                const TL_IDS = ["J1", "J4", "J5", "J6", "J7"];
+                const tls = [];
+                const rsus = [];
+
+                const junctions = net.junction || [];
+                junctions.forEach(j => {
+                    const a = j.$ || {};
+                    if (!TL_IDS.includes(a.id)) return;
+
+                    const x = parseFloat(a.x);
+                    const y = parseFloat(a.y);
+
+                    tls.push({ id: a.id, x, y });
+                    rsus.push({ id: "RSU_" + a.id, x, y });
+                });
+
+                const bounds = { minX, maxX, minY, maxY };
+                cachedNetwork = { lanes, tls, rsus, bounds };
+                res.json(cachedNetwork);
+            } catch (e) {
+                console.error("Error building network JSON:", e);
+                res.status(500).json({ error: "Failed to build network" });
+            }
+        });
     });
 });
 
-
-// ============================
-//   Dashboard API
-// ============================
-app.get("/api/logs", (req, res) => {
-    res.json(rsuLog);
+// ---------- DASHBOARD WS ----------
+wss.on("connection", ws => {
+    console.log("[WS] Dashboard connected");
+    if (lastEVStatus) {
+        ws.send(JSON.stringify({
+            type: "ev_update",
+            data: lastEVStatus
+        }));
+    }
 });
 
-// ============================
-//   Start Server
-// ============================
 const PORT = 3000;
 server.listen(PORT, () => {
-    console.log(`🚦 RSU server running on port ${PORT}`);
-    console.log(`🌐 Dashboard: http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
 });
